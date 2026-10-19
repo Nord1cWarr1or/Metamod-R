@@ -29,7 +29,14 @@ public:
 	}
 
 private:
+	struct block_t
+	{
+		void *ptr;
+		size_t size;
+	};
+
 	void allocate_page();
+	char *allocate_block(size_t size);
 
 	enum
 	{
@@ -37,7 +44,8 @@ private:
 	};
 
 	size_t m_used = 0;
-	std::vector<void *> m_pages;
+	char *m_page = nullptr;
+	std::vector<block_t> m_pages;
 	memory_protection m_protection;
 
 	friend class CJit;

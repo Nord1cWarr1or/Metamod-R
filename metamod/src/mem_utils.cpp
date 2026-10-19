@@ -6,10 +6,14 @@ static_allocator::static_allocator(memory_protection protection) : m_protection(
 
 char *static_allocator::allocate(const size_t n)
 {
-	if (!m_pages.size() || m_used + n > Pagesize)
+	// requests larger than a page get their own block, the current page stays open for small allocations
+	if (n > Pagesize)
+		return allocate_block((n + Pagesize - 1) & ~size_t(Pagesize - 1));
+
+	if (!m_page || m_used + n > Pagesize)
 		allocate_page();
 
-	auto ptr = reinterpret_cast<char *>(m_pages.back()) + m_used;
+	auto ptr = m_page + m_used;
 	m_used += n;
 	return ptr;
 }
@@ -22,25 +26,34 @@ char *static_allocator::strdup(const char *string)
 
 void static_allocator::deallocate_all()
 {
-	for (auto page : m_pages)
+	for (auto& block : m_pages)
 #ifdef WIN32
-		VirtualFree(page, 0, MEM_RELEASE);
+		VirtualFree(block.ptr, 0, MEM_RELEASE);
 #else
-		munmap(page, Pagesize);
+		munmap(block.ptr, block.size);
 #endif
 
 	m_pages.clear();
+	m_page = nullptr;
+	m_used = 0;
 }
 
 size_t static_allocator::memory_used() const
 {
-	return (m_pages.size() - 1) * Pagesize + m_used;
+	size_t used = 0;
+	for (auto& block : m_pages)
+		used += block.size;
+
+	if (m_page)
+		used -= Pagesize - m_used;
+
+	return used;
 }
 
 bool static_allocator::contain(uint32 addr)
 {
-	for (auto p : m_pages) {
-		if (uint32(p) <= addr && addr < uint32(p) + Pagesize)
+	for (auto& block : m_pages) {
+		if (uint32(block.ptr) <= addr && addr < uint32(block.ptr) + block.size)
 			return true;
 	}
 	return false;
@@ -48,8 +61,8 @@ bool static_allocator::contain(uint32 addr)
 
 char *static_allocator::find_pattern(char *pattern, size_t len)
 {
-	for (auto p : m_pages) {
-		for (char *c = (char *)p, *e = c + Pagesize - len; c < e; c++) {
+	for (auto& block : m_pages) {
+		for (char *c = (char *)block.ptr, *e = c + block.size - len; c < e; c++) {
 			if (mem_compare(c, pattern, len))
 				return c;
 		}
@@ -59,14 +72,23 @@ char *static_allocator::find_pattern(char *pattern, size_t len)
 
 void static_allocator::allocate_page()
 {
-#ifdef WIN32
-	auto page = VirtualAlloc(nullptr, Pagesize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-#else
-	auto page = mmap(nullptr, Pagesize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-#endif
-
+	m_page = allocate_block(Pagesize);
 	m_used = 0;
-	m_pages.push_back(page);
+}
+
+char *static_allocator::allocate_block(size_t size)
+{
+#ifdef WIN32
+	auto ptr = VirtualAlloc(nullptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	if (!ptr)
+#else
+	auto ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	if (ptr == MAP_FAILED)
+#endif
+		Sys_Error("%s: failed to allocate %u bytes of executable memory", __func__, (unsigned)size);
+
+	m_pages.push_back({ptr, size});
+	return (char *)ptr;
 }
 
 bool mem_compare(const char *addr, const char *pattern, size_t len)
